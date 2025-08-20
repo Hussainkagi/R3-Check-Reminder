@@ -7,18 +7,22 @@ from datetime import datetime, timedelta
 import requests
 import io
 import logging
-import re
-from urllib.parse import unquote, quote
 import time
+from typing import Optional, Tuple, Dict, Any
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
 
 class SharePointSharedLinkReminder:
-    def __init__(self, sharepoint_shared_url, smtp_server, smtp_port, email_username, email_password, recipient_email):
-        """
-        Initialize the SharePoint Shared Link Reminder system
-        """
+    """SharePoint Shared Link Reminder system"""
+    
+    def __init__(self, sharepoint_shared_url: str, smtp_server: str, smtp_port: int, 
+                 email_username: str, email_password: str, recipient_email: str):
+        """Initialize the SharePoint Shared Link Reminder system"""
         self.sharepoint_shared_url = sharepoint_shared_url
         self.smtp_server = smtp_server
         self.smtp_port = smtp_port
@@ -26,7 +30,7 @@ class SharePointSharedLinkReminder:
         self.email_password = email_password
         self.recipient_email = recipient_email
         
-    def convert_sharepoint_url_to_direct_download(self, shared_url):
+    def convert_sharepoint_url_to_direct_download(self, shared_url: str) -> str:
         """Convert SharePoint shared URL to direct download URL"""
         try:
             logging.info(f"Original URL: {shared_url}")
@@ -50,7 +54,7 @@ class SharePointSharedLinkReminder:
             logging.error(f"Error converting SharePoint URL: {e}")
             return shared_url
     
-    def download_excel_file(self):
+    def download_excel_file(self) -> Optional[io.BytesIO]:
         """Download Excel file from SharePoint shared link"""
         try:
             urls_to_try = [
@@ -59,11 +63,13 @@ class SharePointSharedLinkReminder:
             ]
             
             base_url = self.sharepoint_shared_url.split('?')[0] if '?' in self.sharepoint_shared_url else self.sharepoint_shared_url
-            urls_to_try.extend([
+            additional_urls = [
                 f"{base_url}?download=1",
                 f"{self.sharepoint_shared_url}&download=1" if "?" in self.sharepoint_shared_url else f"{self.sharepoint_shared_url}?download=1",
-            ])
+            ]
+            urls_to_try.extend(additional_urls)
             
+            # Remove duplicates while preserving order
             urls_to_try = list(dict.fromkeys(urls_to_try))
             
             headers = {
@@ -112,10 +118,8 @@ class SharePointSharedLinkReminder:
             logging.error(f"Failed to download Excel file: {e}")
             return None
     
-    def find_header_row_and_columns(self, excel_file):
-        """
-        Intelligently find the header row and identify required columns
-        """
+    def find_header_row_and_columns(self, excel_file: io.BytesIO) -> Tuple[Optional[pd.DataFrame], Optional[int]]:
+        """Intelligently find the header row and identify required columns"""
         try:
             excel_file.seek(0)
             
@@ -127,52 +131,72 @@ class SharePointSharedLinkReminder:
             target_columns = ['mode of payment', 'date of transfer']
             header_candidates = []
             
-            for row_idx in range(min(5, len(sample_df))):
-                row_data = sample_df.iloc[row_idx].astype(str).str.lower()
+            for row_idx in range(min(6, len(sample_df))):
+                row_data = sample_df.iloc[row_idx].astype(str).str.lower().str.strip()
                 matches = 0
+                column_positions: Dict[str, int] = {}
                 
-                for target in target_columns:
-                    target_words = target.split()
-                    for cell_value in row_data:
-                        if pd.notna(cell_value) and cell_value != 'nan':
-                            # Check if all words of target are in the cell
-                            if all(word in cell_value for word in target_words):
+                for col_idx, cell_value in enumerate(row_data):
+                    if pd.notna(cell_value) and cell_value != 'nan' and cell_value.strip():
+                        # Clean the cell value
+                        clean_cell = ' '.join(cell_value.split())
+                        
+                        for target in target_columns:
+                            target_clean = target.replace(' ', '').lower()
+                            cell_clean = clean_cell.replace(' ', '').lower()
+                            
+                            # Exact match (no spaces)
+                            if cell_clean == target_clean:
+                                matches += 2
+                                column_positions[target] = col_idx
+                            # Exact match (with spaces)
+                            elif clean_cell == target:
+                                matches += 2
+                                column_positions[target] = col_idx
+                            # Contains all words
+                            elif all(word in clean_cell for word in target.split()):
                                 matches += 1
-                                break
-                            # Or check if any target word is in the cell (partial match)
-                            elif any(word in cell_value for word in target_words):
-                                matches += 0.5
+                                if target not in column_positions:
+                                    column_positions[target] = col_idx
                 
                 if matches > 0:
-                    header_candidates.append((row_idx, matches))
-                    logging.info(f"Row {row_idx} has {matches} column matches: {row_data.tolist()}")
+                    header_candidates.append((row_idx, matches, column_positions))
+                    logging.info(f"Row {row_idx} has {matches} column matches")
             
             # Sort by best match
             header_candidates.sort(key=lambda x: x[1], reverse=True)
             
             if header_candidates:
-                best_header_row = header_candidates[0][0]
-                logging.info(f"Selected header row: {best_header_row}")
+                best_header_row, best_score, _ = header_candidates[0]
+                logging.info(f"Selected header row: {best_header_row} with score: {best_score}")
                 
-                # Now read the file properly with the identified header row
+                # Read the file with the identified header row
                 excel_file.seek(0)
                 df = pd.read_excel(excel_file, header=best_header_row)
                 
                 # Clean column names
-                df.columns = [str(col).strip().replace('\n', ' ').replace('\r', ' ') for col in df.columns]
-                df.columns = [' '.join(col.split()) for col in df.columns]  # Remove extra spaces
+                df.columns = [
+                    ' '.join(str(col).strip().replace('\n', ' ').replace('\r', ' ').replace('\xa0', ' ').split())
+                    for col in df.columns
+                ]
                 
+                logging.info(f"Cleaned columns: {list(df.columns)}")
                 return df, best_header_row
             else:
-                # Fallback: try each row as header until we find data
-                for header_row in range(min(4, len(sample_df))):
+                # Fallback: try each row as header
+                for header_row in range(min(5, len(sample_df))):
                     try:
                         excel_file.seek(0)
                         df = pd.read_excel(excel_file, header=header_row)
                         if len(df) > 0 and not df.empty:
                             logging.info(f"Using header row {header_row} as fallback")
+                            # Clean column names
+                            df.columns = [
+                                ' '.join(str(col).strip().replace('\n', ' ').replace('\r', ' ').replace('\xa0', ' ').split())
+                                for col in df.columns
+                            ]
                             return df, header_row
-                    except:
+                    except Exception:
                         continue
                 
                 return None, None
@@ -181,7 +205,7 @@ class SharePointSharedLinkReminder:
             logging.error(f"Error finding header row: {e}")
             return None, None
     
-    def parse_excel_data(self, excel_file):
+    def parse_excel_data(self, excel_file: io.BytesIO) -> Optional[pd.DataFrame]:
         """Parse Excel file with intelligent header detection"""
         try:
             # Find the correct header row and read data
@@ -190,100 +214,150 @@ class SharePointSharedLinkReminder:
             if df is None:
                 logging.error("Could not identify proper header row")
                 return None
-            
+
             logging.info(f"Excel file loaded successfully. Shape: {df.shape}")
             logging.info(f"Columns found: {list(df.columns)}")
             
             # Find required columns with flexible matching
             required_columns = ['Mode of Payment', 'Date of Transfer']
-            column_mapping = {}
+            column_mapping: Dict[str, str] = {}
             
             for req_col in required_columns:
                 found_col = None
-                req_words = req_col.lower().split()
+                req_col_lower = req_col.lower().strip()
+                req_words = req_col_lower.split()
                 
-                # Try different matching strategies
+                # Strategy 1: Exact match (case insensitive, whitespace normalized)
                 for df_col in df.columns:
-                    df_col_str = str(df_col).lower()
+                    df_col_clean = str(df_col).lower().strip()
+                    df_col_clean = ' '.join(df_col_clean.split())
                     
-                    # Exact match
-                    if df_col_str == req_col.lower():
+                    if df_col_clean == req_col_lower:
                         found_col = df_col
+                        logging.info(f"✅ Exact match for '{req_col}': '{df_col}'")
                         break
-                    
-                    # All words present
-                    if all(word in df_col_str for word in req_words):
-                        found_col = df_col
-                        break
-                    
-                    # Key word matching
-                    if req_col.lower() == 'mode of payment':
-                        if any(keyword in df_col_str for keyword in ['mode', 'payment', 'pay', 'method']):
+                
+                # Strategy 2: Contains all words
+                if not found_col:
+                    for df_col in df.columns:
+                        df_col_clean = str(df_col).lower().strip()
+                        if all(word in df_col_clean for word in req_words):
                             found_col = df_col
+                            logging.info(f"✅ Word match for '{req_col}': '{df_col}'")
                             break
-                    elif req_col.lower() == 'date of transfer':
-                        if any(keyword in df_col_str for keyword in ['date', 'transfer', 'due']):
-                            found_col = df_col
-                            break
+                
+                # Strategy 3: Keyword matching
+                if not found_col:
+                    for df_col in df.columns:
+                        df_col_clean = str(df_col).lower().strip()
+                        
+                        if req_col.lower() == 'mode of payment':
+                            if any(keyword in df_col_clean for keyword in ['payment', 'pay', 'mode']):
+                                if not any(exclude in df_col_clean for exclude in ['amount', 'due', 'reference', 'related']):
+                                    found_col = df_col
+                                    logging.info(f"✅ Keyword match for '{req_col}': '{df_col}'")
+                                    break
+                        
+                        elif req_col.lower() == 'date of transfer':
+                            if 'transfer' in df_col_clean and 'date' in df_col_clean:
+                                found_col = df_col
+                                logging.info(f"✅ Transfer date match for '{req_col}': '{df_col}'")
+                                break
+                            elif ('date' in df_col_clean and 
+                                  any(word in df_col_clean for word in ['transfer', 'due', 'payment']) and
+                                  not any(exclude in df_col_clean for exclude in ['created', 'create'])):
+                                found_col = df_col
+                                logging.info(f"✅ Date fallback match for '{req_col}': '{df_col}'")
+                                break
                 
                 if found_col:
                     column_mapping[req_col] = found_col
-                    logging.info(f"✅ Mapped '{req_col}' to column '{found_col}'")
+                    logging.info(f"✅ Final mapping: '{req_col}' -> '{found_col}'")
                 else:
                     logging.error(f"❌ Required column '{req_col}' not found")
                     logging.error(f"Available columns: {list(df.columns)}")
-                    
-                    # Show sample of first few rows to help debug
                     logging.info("First few rows of data:")
-                    logging.info(df.head().to_string())
+                    logging.info(df.head(3).to_string())
                     return None
             
-            # Rename columns
-            df = df.rename(columns=column_mapping)
+            # Create a copy and rename columns
+            df_work = df.copy()
+            df_work = df_work.rename(columns=column_mapping)
             
-            # Remove rows where both key columns are empty/null
-            df = df.dropna(subset=['Mode of Payment', 'Date of Transfer'], how='all')
+            # Verify the required columns exist after renaming
+            missing_cols = [col for col in required_columns if col not in df_work.columns]
+            if missing_cols:
+                logging.error(f"❌ Missing columns after renaming: {missing_cols}")
+                return None
+            
+            logging.info("✅ Column mapping successful")
+            
+            # Remove completely empty rows
+            df_work = df_work.dropna(subset=required_columns, how='all')
             
             # Filter for cheque payments
-            df['Mode of Payment'] = df['Mode of Payment'].astype(str)
-            cheque_mask = df['Mode of Payment'].str.lower().str.contains('cheque|check', na=False)
-            cheque_df = df[cheque_mask].copy()
+            df_work['Mode of Payment'] = df_work['Mode of Payment'].astype(str)
+            cheque_mask = df_work['Mode of Payment'].str.lower().str.contains(
+                'cheque|check', na=False, regex=True
+            )
+            cheque_df = df_work[cheque_mask].copy()
             
             if cheque_df.empty:
                 logging.info("No cheque payments found")
+                unique_payments = df_work['Mode of Payment'].value_counts()
+                logging.info(f"Available payment modes: {unique_payments.to_dict()}")
                 return pd.DataFrame()
             
             logging.info(f"Found {len(cheque_df)} cheque payments")
             
-            # Parse dates
+            # Parse dates with improved format handling
             date_formats = [
-                '%d-%b-%y', '%d-%b-%Y', '%d/%m/%y', '%d/%m/%Y', 
-                '%Y-%m-%d', '%m/%d/%Y', '%d.%m.%Y', '%Y/%m/%d',
-                '%d-%m-%y', '%d-%m-%Y'
+                '%d-%b-%y',    # 22-Feb-25
+                '%d-%b-%Y',    # 22-Feb-2025
+                '%d/%m/%y',    # 22/02/25
+                '%d/%m/%Y',    # 22/02/2025
+                '%Y-%m-%d',    # 2025-02-22
+                '%m/%d/%Y',    # 02/22/2025
+                '%d.%m.%Y',    # 22.02.2025
+                '%Y/%m/%d',    # 2025/02/22
+                '%d-%m-%y',    # 22-02-25
+                '%d-%m-%Y'     # 22-02-2025
             ]
             
+            parsed_dates = 0
             for date_format in date_formats:
                 try:
-                    cheque_df['Date of Transfer'] = pd.to_datetime(
-                        cheque_df['Date of Transfer'], format=date_format, errors='coerce'
+                    temp_dates = pd.to_datetime(
+                        cheque_df['Date of Transfer'], 
+                        format=date_format, 
+                        errors='coerce'
                     )
-                    valid_dates = cheque_df['Date of Transfer'].notna().sum()
-                    if valid_dates > 0:
-                        logging.info(f"Parsed {valid_dates} dates using format {date_format}")
-                        break
-                except:
+                    valid_count = temp_dates.notna().sum()
+                    
+                    if valid_count > parsed_dates:
+                        cheque_df['Date of Transfer'] = temp_dates
+                        parsed_dates = valid_count
+                        logging.info(f"Parsed {valid_count} dates using format {date_format}")
+                        
+                        if parsed_dates == len(cheque_df):
+                            break
+                            
+                except Exception as e:
+                    logging.debug(f"Date format {date_format} failed: {e}")
                     continue
-            else:
-                # Automatic parsing
+            
+            # If no format worked well, try automatic parsing
+            if parsed_dates < len(cheque_df) * 0.5:
                 try:
                     cheque_df['Date of Transfer'] = pd.to_datetime(
                         cheque_df['Date of Transfer'], errors='coerce'
                     )
-                    logging.info("Used automatic date parsing")
-                except:
-                    logging.error("Failed to parse dates")
+                    final_parsed = cheque_df['Date of Transfer'].notna().sum()
+                    logging.info(f"Automatic parsing resulted in {final_parsed} valid dates")
+                except Exception as e:
+                    logging.error(f"Automatic date parsing failed: {e}")
             
-            # Remove invalid dates
+            # Remove rows with invalid dates
             initial_count = len(cheque_df)
             cheque_df = cheque_df.dropna(subset=['Date of Transfer'])
             final_count = len(cheque_df)
@@ -292,7 +366,13 @@ class SharePointSharedLinkReminder:
             
             if final_count > 0:
                 logging.info("Sample processed data:")
-                logging.info(cheque_df[['Mode of Payment', 'Date of Transfer']].head().to_string())
+                sample_data = cheque_df[['Mode of Payment', 'Date of Transfer']].head(3)
+                logging.info(sample_data.to_string())
+                
+                # Show date range
+                min_date = cheque_df['Date of Transfer'].min()
+                max_date = cheque_df['Date of Transfer'].max()
+                logging.info(f"Date range: {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}")
             
             return cheque_df
             
@@ -302,7 +382,7 @@ class SharePointSharedLinkReminder:
             logging.error(traceback.format_exc())
             return None
     
-    def find_reminders_needed(self, df):
+    def find_reminders_needed(self, df: pd.DataFrame) -> pd.DataFrame:
         """Find cheques that need reminders (3 days before transfer date)"""
         if df is None or df.empty:
             return pd.DataFrame()
@@ -318,39 +398,13 @@ class SharePointSharedLinkReminder:
         if len(reminders_needed) > 0:
             logging.info("Reminders for:")
             for _, row in reminders_needed.iterrows():
-                logging.info(f"  - {row.get('Mode of Payment', 'N/A')} on {row['Date of Transfer'].strftime('%Y-%m-%d')}")
+                payment_mode = row.get('Mode of Payment', 'N/A')
+                transfer_date = row['Date of Transfer'].strftime('%Y-%m-%d')
+                logging.info(f"  - {payment_mode} on {transfer_date}")
         
         return reminders_needed
     
-    def send_email_reminder(self, reminder_data):
-        """Send email reminder"""
-        if reminder_data.empty:
-            logging.info("No reminders to send")
-            return True
-        
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = self.email_username
-            msg['To'] = self.recipient_email
-            msg['Subject'] = f"Cheque Transfer Reminder - {len(reminder_data)} payment(s) due in 3 days"
-            
-            body = self.create_email_body(reminder_data)
-            msg.attach(MIMEText(body, 'html'))
-            
-            server = smtplib.SMTP(self.smtp_server, self.smtp_port)
-            server.starttls()
-            server.login(self.email_username, self.email_password)
-            server.send_message(msg)
-            server.quit()
-            
-            logging.info(f"✅ Email reminder sent successfully to {self.recipient_email}")
-            return True
-            
-        except Exception as e:
-            logging.error(f"Failed to send email: {e}")
-            return False
-    
-    def create_email_body(self, reminder_data):
+    def create_email_body(self, reminder_data: pd.DataFrame) -> str:
         """Create HTML email body"""
         html_body = """
         <html>
@@ -378,17 +432,22 @@ class SharePointSharedLinkReminder:
                 value = row[col]
                 if pd.isna(value):
                     value = ""
-                elif col == 'Date of Transfer':
-                    value = value.strftime('%d-%b-%Y') if hasattr(value, 'strftime') else str(value)
+                elif col == 'Date of Transfer' and hasattr(value, 'strftime'):
+                    value = value.strftime('%d-%b-%Y')
+                else:
+                    value = str(value)
                 html_body += f"<td style='padding: 10px; border-bottom: 1px solid #ddd;'>{value}</td>"
             html_body += "</tr>"
+        
+        today_str = datetime.now().strftime('%d-%b-%Y')
+        target_str = (datetime.now() + timedelta(days=3)).strftime('%d-%b-%Y')
         
         html_body += f"""
                 </tbody>
             </table>
             <div style="margin-top: 20px; padding: 15px; background-color: #e8f4fd; border-left: 4px solid #2196F3;">
-                <p><strong>📅 Reminder Date:</strong> {datetime.now().strftime('%d-%b-%Y')}</p>
-                <p><strong>🎯 Target Transfer Date:</strong> {(datetime.now() + timedelta(days=3)).strftime('%d-%b-%Y')}</p>
+                <p><strong>📅 Reminder Date:</strong> {today_str}</p>
+                <p><strong>🎯 Target Transfer Date:</strong> {target_str}</p>
             </div>
             <br>
             <p style="color: #666; font-size: 14px;">
@@ -401,7 +460,34 @@ class SharePointSharedLinkReminder:
         
         return html_body
     
-    def run_reminder_check(self):
+    def send_email_reminder(self, reminder_data: pd.DataFrame) -> bool:
+        """Send email reminder"""
+        if reminder_data.empty:
+            logging.info("No reminders to send")
+            return True
+        
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = self.email_username
+            msg['To'] = self.recipient_email
+            msg['Subject'] = f"Cheque Transfer Reminder - {len(reminder_data)} payment(s) due in 3 days"
+            
+            body = self.create_email_body(reminder_data)
+            msg.attach(MIMEText(body, 'html'))
+            
+            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+                server.starttls()
+                server.login(self.email_username, self.email_password)
+                server.send_message(msg)
+            
+            logging.info(f"✅ Email reminder sent successfully to {self.recipient_email}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to send email: {e}")
+            return False
+    
+    def run_reminder_check(self) -> bool:
         """Main method to run the reminder check"""
         logging.info("🚀 Starting SharePoint cheque reminder check...")
         
@@ -428,14 +514,15 @@ class SharePointSharedLinkReminder:
             logging.info("ℹ️  No cheque transfer reminders needed today")
             return True
 
-def main():
+
+def main() -> bool:
     """Main function"""
     logging.info("📋 SharePoint Cheque Reminder Starting...")
     
     config = {
         'sharepoint_shared_url': os.getenv('SHAREPOINT_SHARED_URL'),
         'smtp_server': os.getenv('SMTP_SERVER'),
-        'smtp_port': int(os.getenv('SMTP_PORT', 587)),
+        'smtp_port': int(os.getenv('SMTP_PORT', '587')),
         'email_username': os.getenv('EMAIL_USERNAME'),
         'email_password': os.getenv('EMAIL_PASSWORD'),
         'recipient_email': os.getenv('RECIPIENT_EMAIL')
@@ -457,6 +544,7 @@ def main():
         logging.error("💥 Reminder check failed")
         
     return success
+
 
 if __name__ == "__main__":
     success = main()
