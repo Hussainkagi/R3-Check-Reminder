@@ -128,7 +128,7 @@ class SharePointSharedLinkReminder:
             logging.info(f"Sample data shape: {sample_df.shape}")
             
             # Look for rows that contain our target column names
-            target_columns = ['mode of payment', 'date of transfer']
+            target_columns = ['mode of payment', 'payment due [date]']
             header_candidates = []
             
             for row_idx in range(min(6, len(sample_df))):
@@ -142,19 +142,19 @@ class SharePointSharedLinkReminder:
                         clean_cell = ' '.join(cell_value.split())
                         
                         for target in target_columns:
-                            target_clean = target.replace(' ', '').lower()
-                            cell_clean = clean_cell.replace(' ', '').lower()
+                            target_clean = target.replace(' ', '').replace('[', '').replace(']', '').lower()
+                            cell_clean = clean_cell.replace(' ', '').replace('[', '').replace(']', '').lower()
                             
-                            # Exact match (no spaces)
+                            # Exact match (no spaces, brackets)
                             if cell_clean == target_clean:
                                 matches += 2
                                 column_positions[target] = col_idx
-                            # Exact match (with spaces)
-                            elif clean_cell == target:
+                            # Exact match (with spaces/brackets)
+                            elif clean_cell.lower() == target:
                                 matches += 2
                                 column_positions[target] = col_idx
                             # Contains all words
-                            elif all(word in clean_cell for word in target.split()):
+                            elif all(word in clean_cell for word in target.replace('[', '').replace(']', '').split()):
                                 matches += 1
                                 if target not in column_positions:
                                     column_positions[target] = col_idx
@@ -219,13 +219,13 @@ class SharePointSharedLinkReminder:
             logging.info(f"Columns found: {list(df.columns)}")
             
             # Find required columns with flexible matching
-            required_columns = ['Mode of Payment', 'Date of Transfer']
+            required_columns = ['Mode of Payment', 'Payment Due [Date]']
             column_mapping: Dict[str, str] = {}
             
             for req_col in required_columns:
                 found_col = None
                 req_col_lower = req_col.lower().strip()
-                req_words = req_col_lower.split()
+                req_words = req_col_lower.replace('[', '').replace(']', '').split()
                 
                 # Strategy 1: Exact match (case insensitive, whitespace normalized)
                 for df_col in df.columns:
@@ -237,10 +237,10 @@ class SharePointSharedLinkReminder:
                         logging.info(f"✅ Exact match for '{req_col}': '{df_col}'")
                         break
                 
-                # Strategy 2: Contains all words
+                # Strategy 2: Contains all words (ignoring brackets)
                 if not found_col:
                     for df_col in df.columns:
-                        df_col_clean = str(df_col).lower().strip()
+                        df_col_clean = str(df_col).lower().strip().replace('[', '').replace(']', '')
                         if all(word in df_col_clean for word in req_words):
                             found_col = df_col
                             logging.info(f"✅ Word match for '{req_col}': '{df_col}'")
@@ -258,16 +258,20 @@ class SharePointSharedLinkReminder:
                                     logging.info(f"✅ Keyword match for '{req_col}': '{df_col}'")
                                     break
                         
-                        elif req_col.lower() == 'date of transfer':
-                            if 'transfer' in df_col_clean and 'date' in df_col_clean:
+                        elif req_col.lower() == 'payment due [date]':
+                            # Look for payment due date variations
+                            if ('payment' in df_col_clean and 'due' in df_col_clean and 'date' in df_col_clean):
                                 found_col = df_col
-                                logging.info(f"✅ Transfer date match for '{req_col}': '{df_col}'")
+                                logging.info(f"✅ Payment due date match for '{req_col}': '{df_col}'")
                                 break
-                            elif ('date' in df_col_clean and 
-                                  any(word in df_col_clean for word in ['transfer', 'due', 'payment']) and
-                                  not any(exclude in df_col_clean for exclude in ['created', 'create'])):
+                            elif ('due' in df_col_clean and 'date' in df_col_clean):
                                 found_col = df_col
-                                logging.info(f"✅ Date fallback match for '{req_col}': '{df_col}'")
+                                logging.info(f"✅ Due date match for '{req_col}': '{df_col}'")
+                                break
+                            elif ('payment' in df_col_clean and 'date' in df_col_clean and 
+                                  not any(exclude in df_col_clean for exclude in ['transfer', 'created', 'create'])):
+                                found_col = df_col
+                                logging.info(f"✅ Payment date fallback match for '{req_col}': '{df_col}'")
                                 break
                 
                 if found_col:
@@ -328,14 +332,14 @@ class SharePointSharedLinkReminder:
             for date_format in date_formats:
                 try:
                     temp_dates = pd.to_datetime(
-                        cheque_df['Date of Transfer'], 
+                        cheque_df['Payment Due [Date]'], 
                         format=date_format, 
                         errors='coerce'
                     )
                     valid_count = temp_dates.notna().sum()
                     
                     if valid_count > parsed_dates:
-                        cheque_df['Date of Transfer'] = temp_dates
+                        cheque_df['Payment Due [Date]'] = temp_dates
                         parsed_dates = valid_count
                         logging.info(f"Parsed {valid_count} dates using format {date_format}")
                         
@@ -349,29 +353,29 @@ class SharePointSharedLinkReminder:
             # If no format worked well, try automatic parsing
             if parsed_dates < len(cheque_df) * 0.5:
                 try:
-                    cheque_df['Date of Transfer'] = pd.to_datetime(
-                        cheque_df['Date of Transfer'], errors='coerce'
+                    cheque_df['Payment Due [Date]'] = pd.to_datetime(
+                        cheque_df['Payment Due [Date]'], errors='coerce'
                     )
-                    final_parsed = cheque_df['Date of Transfer'].notna().sum()
+                    final_parsed = cheque_df['Payment Due [Date]'].notna().sum()
                     logging.info(f"Automatic parsing resulted in {final_parsed} valid dates")
                 except Exception as e:
                     logging.error(f"Automatic date parsing failed: {e}")
             
             # Remove rows with invalid dates
             initial_count = len(cheque_df)
-            cheque_df = cheque_df.dropna(subset=['Date of Transfer'])
+            cheque_df = cheque_df.dropna(subset=['Payment Due [Date]'])
             final_count = len(cheque_df)
             
             logging.info(f"Final: {final_count} cheque payments with valid dates (from {initial_count})")
             
             if final_count > 0:
                 logging.info("Sample processed data:")
-                sample_data = cheque_df[['Mode of Payment', 'Date of Transfer']].head(3)
+                sample_data = cheque_df[['Mode of Payment', 'Payment Due [Date]']].head(3)
                 logging.info(sample_data.to_string())
                 
                 # Show date range
-                min_date = cheque_df['Date of Transfer'].min()
-                max_date = cheque_df['Date of Transfer'].max()
+                min_date = cheque_df['Payment Due [Date]'].min()
+                max_date = cheque_df['Payment Due [Date]'].max()
                 logging.info(f"Date range: {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}")
             
             return cheque_df
@@ -383,14 +387,14 @@ class SharePointSharedLinkReminder:
             return None
     
     def find_reminders_needed(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Find cheques that need reminders (3 days before transfer date)"""
+        """Find cheques that need reminders (3 days before payment due date)"""
         if df is None or df.empty:
             return pd.DataFrame()
         
         today = datetime.now().date()
         target_date = today + timedelta(days=3)
         
-        reminders_needed = df[df['Date of Transfer'].dt.date == target_date].copy()
+        reminders_needed = df[df['Payment Due [Date]'].dt.date == target_date].copy()
         
         logging.info(f"Checking for reminders needed for {target_date}")
         logging.info(f"Found {len(reminders_needed)} reminders needed")
@@ -399,8 +403,8 @@ class SharePointSharedLinkReminder:
             logging.info("Reminders for:")
             for _, row in reminders_needed.iterrows():
                 payment_mode = row.get('Mode of Payment', 'N/A')
-                transfer_date = row['Date of Transfer'].strftime('%Y-%m-%d')
-                logging.info(f"  - {payment_mode} on {transfer_date}")
+                due_date = row['Payment Due [Date]'].strftime('%Y-%m-%d')
+                logging.info(f"  - {payment_mode} on {due_date}")
         
         return reminders_needed
     
@@ -409,8 +413,8 @@ class SharePointSharedLinkReminder:
         html_body = """
         <html>
         <body>
-            <h2>🏦 Cheque Transfer Reminder</h2>
-            <p>The following cheque payments are due for transfer in <strong>3 days</strong>:</p>
+            <h2>🏦 Cheque Payment Due Reminder</h2>
+            <p>The following cheque payments are <strong>due in 3 days</strong>:</p>
             <table border="1" style="border-collapse: collapse; width: 100%; margin: 20px 0;">
                 <thead>
                     <tr style="background-color: #f2f2f2;">
@@ -432,7 +436,7 @@ class SharePointSharedLinkReminder:
                 value = row[col]
                 if pd.isna(value):
                     value = ""
-                elif col == 'Date of Transfer' and hasattr(value, 'strftime'):
+                elif col == 'Payment Due [Date]' and hasattr(value, 'strftime'):
                     value = value.strftime('%d-%b-%Y')
                 else:
                     value = str(value)
@@ -447,12 +451,12 @@ class SharePointSharedLinkReminder:
             </table>
             <div style="margin-top: 20px; padding: 15px; background-color: #e8f4fd; border-left: 4px solid #2196F3;">
                 <p><strong>📅 Reminder Date:</strong> {today_str}</p>
-                <p><strong>🎯 Target Transfer Date:</strong> {target_str}</p>
+                <p><strong>🎯 Payment Due Date:</strong> {target_str}</p>
             </div>
             <br>
             <p style="color: #666; font-size: 14px;">
                 <em>⚡ This is an automated reminder generated from your SharePoint file.</em><br>
-                <em>Please ensure these cheques are processed on time to avoid any delays.</em>
+                <em>Please ensure these cheque payments are processed on time to avoid any delays.</em>
             </p>
         </body>
         </html>
@@ -470,7 +474,7 @@ class SharePointSharedLinkReminder:
             msg = MIMEMultipart()
             msg['From'] = self.email_username
             msg['To'] = self.recipient_email
-            msg['Subject'] = f"Cheque Transfer Reminder - {len(reminder_data)} payment(s) due in 3 days"
+            msg['Subject'] = f"Cheque Payment Due Reminder - {len(reminder_data)} payment(s) due in 3 days"
             
             body = self.create_email_body(reminder_data)
             msg.attach(MIMEText(body, 'html'))
@@ -489,7 +493,7 @@ class SharePointSharedLinkReminder:
     
     def run_reminder_check(self) -> bool:
         """Main method to run the reminder check"""
-        logging.info("🚀 Starting SharePoint cheque reminder check...")
+        logging.info("🚀 Starting SharePoint cheque payment due reminder check...")
         
         excel_file = self.download_excel_file()
         if not excel_file:
@@ -511,13 +515,13 @@ class SharePointSharedLinkReminder:
                 logging.error("❌ Failed to send reminder email")
             return success
         else:
-            logging.info("ℹ️  No cheque transfer reminders needed today")
+            logging.info("ℹ️  No cheque payment due reminders needed today")
             return True
 
 
 def main() -> bool:
     """Main function"""
-    logging.info("📋 SharePoint Cheque Reminder Starting...")
+    logging.info("📋 SharePoint Cheque Payment Due Reminder Starting...")
     
     config = {
         'sharepoint_shared_url': os.getenv('SHAREPOINT_SHARED_URL'),
