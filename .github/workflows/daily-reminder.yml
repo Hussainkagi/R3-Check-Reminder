@@ -50,7 +50,7 @@ jobs:
 
       # Step 5: Upload logs as artifacts (for debugging)
       - name: Upload logs
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always() # Upload even if previous steps failed
         with:
           name: reminder-logs-${{ github.run_number }}
