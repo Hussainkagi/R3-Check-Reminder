@@ -8,7 +8,8 @@ import requests
 import io
 import logging
 import re
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -36,130 +37,181 @@ class SharePointSharedLinkReminder:
     def convert_sharepoint_url_to_direct_download(self, shared_url):
         """
         Convert SharePoint shared URL to direct download URL
+        Multiple methods to handle different SharePoint URL formats
         """
         try:
-            # Extract the file ID from the SharePoint URL
-            # Pattern for OneDrive/SharePoint shared links
-            if "sharepoint.com" in shared_url and ":x:" in shared_url:
-                # Extract the direct download URL
-                # Replace the view URL with download URL
-                if "?e=" in shared_url:
-                    base_url = shared_url.split("?e=")[0]
+            logging.info(f"Original URL: {shared_url}")
+            
+            # Method 1: Try to extract direct download URL by replacing view with download
+            if "sharepoint.com" in shared_url and ("/:x:/" in shared_url or "/:b:/" in shared_url):
+                # Replace :x: with :b: and add download=1
+                if "/:x:/" in shared_url:
+                    download_url = shared_url.replace("/:x:/", "/:b:/")
                 else:
-                    base_url = shared_url
-                
-                # Convert to direct download URL
-                download_url = base_url.replace(":x:/g/personal/", ":x:/g/personal/").replace(":x:", ":b:")
-                
-                # Alternative method: try to get direct download link
-                if "/_layouts/15/Doc.aspx?sourcedoc=" in shared_url:
-                    # Already in the right format
                     download_url = shared_url
-                else:
-                    # Convert the sharing URL to download URL
-                    # This might need adjustment based on the exact SharePoint setup
-                    download_url = shared_url.replace("/personal/", "/personal/").replace(":x:", ":b:")
                     
-                logging.info(f"Converted URL to: {download_url}")
+                # Add download parameter if not present
+                if "download=1" not in download_url:
+                    separator = "&" if "?" in download_url else "?"
+                    download_url = f"{download_url}{separator}download=1"
+                    
+                logging.info(f"Method 1 - Download URL: {download_url}")
                 return download_url
-            else:
-                # If it's already a direct download URL or different format
-                return shared_url
+                
+            # Method 2: Handle different SharePoint URL formats
+            elif "_layouts/15/Doc.aspx" in shared_url:
+                # Already in a usable format, just add download parameter
+                download_url = shared_url
+                if "download=1" not in download_url:
+                    separator = "&" if "?" in download_url else "?"
+                    download_url = f"{download_url}{separator}download=1"
+                logging.info(f"Method 2 - Download URL: {download_url}")
+                return download_url
+                
+            # Method 3: Try to construct download URL from sharing URL
+            elif "sharepoint.com" in shared_url:
+                # Extract the file ID and construct download URL
+                parts = shared_url.split('/')
+                for i, part in enumerate(parts):
+                    if part == "personal":
+                        try:
+                            # Reconstruct with download format
+                            base_parts = parts[:i+2]  # Include domain and personal/username
+                            base_url = "/".join(base_parts)
+                            download_url = f"{base_url}/_layouts/15/download.aspx?SourceUrl={quote(shared_url)}"
+                            logging.info(f"Method 3 - Download URL: {download_url}")
+                            return download_url
+                        except:
+                            pass
+            
+            # If no conversion worked, return original URL
+            logging.info("No URL conversion applied, using original URL")
+            return shared_url
                 
         except Exception as e:
             logging.error(f"Error converting SharePoint URL: {e}")
             return shared_url
     
     def download_excel_file(self):
-        """Download Excel file from SharePoint shared link"""
+        """Download Excel file from SharePoint shared link with multiple strategies"""
         try:
-            # Convert to download URL
-            download_url = self.convert_sharepoint_url_to_direct_download(self.sharepoint_shared_url)
+            # Strategy 1: Try different URL formats
+            urls_to_try = [
+                self.sharepoint_shared_url,
+                self.convert_sharepoint_url_to_direct_download(self.sharepoint_shared_url),
+            ]
+            
+            # Add more URL variations
+            base_url = self.sharepoint_shared_url.split('?')[0] if '?' in self.sharepoint_shared_url else self.sharepoint_shared_url
+            urls_to_try.extend([
+                f"{base_url}?download=1",
+                f"{self.sharepoint_shared_url}&download=1" if "?" in self.sharepoint_shared_url else f"{self.sharepoint_shared_url}?download=1",
+            ])
+            
+            # Remove duplicates while preserving order
+            urls_to_try = list(dict.fromkeys(urls_to_try))
             
             # Set headers to mimic a browser request
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,*/*',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/octet-stream,*/*',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept-Encoding': 'gzip, deflate, br',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
             }
             
-            # Try multiple URL formats
-            urls_to_try = [
-                download_url,
-                self.sharepoint_shared_url,
-                # Add &download=1 parameter
-                f"{download_url}&download=1" if "?" in download_url else f"{download_url}?download=1",
-            ]
+            session = requests.Session()
             
-            for url in urls_to_try:
+            for i, url in enumerate(urls_to_try):
                 try:
-                    logging.info(f"Trying to download from: {url}")
-                    response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
+                    logging.info(f"Attempt {i+1}: Trying to download from: {url}")
+                    
+                    response = session.get(url, headers=headers, timeout=30, allow_redirects=True)
+                    logging.info(f"Response status: {response.status_code}")
+                    logging.info(f"Content-Type: {response.headers.get('content-type', 'N/A')}")
+                    logging.info(f"Content-Length: {len(response.content)} bytes")
                     
                     if response.status_code == 200:
-                        # Check if the response contains Excel data
                         content_type = response.headers.get('content-type', '').lower()
-                        if ('excel' in content_type or 
-                            'spreadsheet' in content_type or 
-                            'vnd.openxmlformats' in content_type or
-                            len(response.content) > 1000):  # Assume it's Excel if content is substantial
+                        
+                        # Check if response is HTML (SharePoint login/error page)
+                        if 'text/html' in content_type or response.content.startswith(b'<!DOCTYPE') or response.content.startswith(b'<html'):
+                            logging.warning(f"Received HTML instead of Excel file. First 200 chars: {response.content[:200]}")
+                            continue
+                        
+                        # Check if the response looks like an Excel file
+                        if (len(response.content) > 1000 and  # Must have substantial content
+                            ('excel' in content_type or 
+                             'spreadsheet' in content_type or 
+                             'vnd.openxmlformats' in content_type or
+                             'application/octet-stream' in content_type or
+                             response.content.startswith(b'PK') or  # ZIP/Excel signature
+                             response.content.startswith(b'\xd0\xcf\x11\xe0'))):  # Old Excel signature
                             
-                            bytes_file_obj = io.BytesIO(response.content)
-                            logging.info("Successfully downloaded Excel file from SharePoint")
-                            return bytes_file_obj
+                            logging.info(f"✅ Successfully downloaded Excel file ({len(response.content)} bytes)")
+                            return io.BytesIO(response.content)
                         else:
-                            logging.warning(f"Response doesn't seem to be Excel file. Content-Type: {content_type}")
+                            logging.warning(f"Content doesn't appear to be Excel file. Content starts with: {response.content[:50]}")
                     else:
                         logging.warning(f"HTTP {response.status_code} for URL: {url}")
                         
                 except requests.exceptions.RequestException as e:
                     logging.warning(f"Request failed for {url}: {e}")
                     continue
+                
+                # Add small delay between attempts
+                time.sleep(1)
             
-            # If all direct methods fail, try to extract the actual file URL from the page
-            return self.extract_file_from_sharepoint_page()
+            # Strategy 2: Try to extract direct download link from SharePoint page
+            logging.info("Attempting to extract download link from SharePoint page...")
+            return self.extract_file_from_sharepoint_page(session, headers)
             
         except Exception as e:
             logging.error(f"Failed to download Excel file: {e}")
             return None
     
-    def extract_file_from_sharepoint_page(self):
-        """Try to extract the actual file URL from SharePoint page"""
+    def extract_file_from_sharepoint_page(self, session, headers):
+        """Try to extract the actual file download URL from SharePoint page"""
         try:
-            logging.info("Attempting to extract file URL from SharePoint page...")
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            
-            response = requests.get(self.sharepoint_shared_url, headers=headers, timeout=30)
+            response = session.get(self.sharepoint_shared_url, headers=headers, timeout=30)
             
             if response.status_code == 200:
-                # Look for download links in the page content
                 content = response.text
+                logging.info("Searching for download URLs in page content...")
                 
-                # Try to find direct download URLs in the page
+                # Multiple patterns to search for download URLs
                 download_patterns = [
                     r'"downloadUrl":"([^"]+)"',
-                    r'"@microsoft.graph.downloadUrl":"([^"]+)"',
+                    r'"@microsoft\.graph\.downloadUrl":"([^"]+)"',
                     r'data-downloadurl="([^"]+)"',
+                    r'"downloadUrl"\s*:\s*"([^"]+)"',
+                    r'downloadUrl["\']?\s*:\s*["\']([^"\']+)["\']',
+                    r'href="([^"]*download[^"]*)"',
                 ]
                 
                 for pattern in download_patterns:
-                    matches = re.findall(pattern, content)
+                    matches = re.findall(pattern, content, re.IGNORECASE)
                     if matches:
-                        download_url = matches[0].replace('\\u0026', '&')
-                        logging.info(f"Found download URL: {download_url}")
-                        
-                        # Try to download from this URL
-                        file_response = requests.get(download_url, headers=headers, timeout=30)
-                        if file_response.status_code == 200:
-                            return io.BytesIO(file_response.content)
+                        for match in matches:
+                            download_url = match.replace('\\u0026', '&').replace('\\/', '/')
+                            if 'sharepoint.com' in download_url:
+                                logging.info(f"Found potential download URL: {download_url}")
+                                
+                                try:
+                                    file_response = session.get(download_url, headers=headers, timeout=30)
+                                    if file_response.status_code == 200 and len(file_response.content) > 1000:
+                                        content_type = file_response.headers.get('content-type', '').lower()
+                                        if not ('text/html' in content_type or file_response.content.startswith(b'<!DOCTYPE')):
+                                            logging.info("✅ Successfully downloaded Excel file using extracted URL")
+                                            return io.BytesIO(file_response.content)
+                                except:
+                                    continue
             
-            logging.error("Could not extract download URL from SharePoint page")
+            logging.error("Could not extract valid download URL from SharePoint page")
             return None
             
         except Exception as e:
@@ -169,13 +221,26 @@ class SharePointSharedLinkReminder:
     def parse_excel_data(self, excel_file):
         """Parse Excel file and return relevant data"""
         try:
-            # Try reading the Excel file
-            try:
-                df = pd.read_excel(excel_file, engine='openpyxl')
-            except Exception as e:
-                logging.warning(f"Failed with openpyxl, trying xlrd: {e}")
-                excel_file.seek(0)  # Reset file pointer
-                df = pd.read_excel(excel_file, engine='xlrd')
+            # Reset file pointer to beginning
+            excel_file.seek(0)
+            
+            # Try different engines and methods
+            engines_to_try = ['openpyxl', 'xlrd']
+            df = None
+            
+            for engine in engines_to_try:
+                try:
+                    excel_file.seek(0)  # Reset file pointer
+                    df = pd.read_excel(excel_file, engine=engine)
+                    logging.info(f"Successfully loaded Excel file using {engine} engine")
+                    break
+                except Exception as e:
+                    logging.warning(f"Failed with {engine} engine: {e}")
+                    continue
+            
+            if df is None:
+                logging.error("Failed to read Excel file with any engine")
+                return None
             
             logging.info(f"Excel file loaded successfully. Shape: {df.shape}")
             logging.info(f"Columns found: {list(df.columns)}")
@@ -194,7 +259,9 @@ class SharePointSharedLinkReminder:
                 if found_col is None:
                     # Try partial matching
                     for df_col in df.columns:
-                        if req_col.lower().replace(' ', '').replace('_', '') in str(df_col).lower().replace(' ', '').replace('_', ''):
+                        col_clean = str(df_col).lower().replace(' ', '').replace('_', '').replace('-', '')
+                        req_clean = req_col.lower().replace(' ', '').replace('_', '').replace('-', '')
+                        if req_clean in col_clean or col_clean in req_clean:
                             found_col = df_col
                             break
                 
@@ -218,7 +285,7 @@ class SharePointSharedLinkReminder:
                 return pd.DataFrame()
             
             # Convert Date of Transfer to datetime with multiple format attempts
-            date_formats = ['%d-%b-%y', '%d-%b-%Y', '%d/%m/%y', '%d/%m/%Y', '%Y-%m-%d', '%m/%d/%Y']
+            date_formats = ['%d-%b-%y', '%d-%b-%Y', '%d/%m/%y', '%d/%m/%Y', '%Y-%m-%d', '%m/%d/%Y', '%d.%m.%Y', '%Y/%m/%d']
             
             for date_format in date_formats:
                 try:
