@@ -1,4 +1,18 @@
 pandas>=1.5.0
 openpyxl>=3.0.0
-Office365-REST-Python-Client>=2.4.0
+xlrd>=2.0.1
+requests>=2.28.0
 python-dateutil>=2.8.0
+
+
+
+
+
+export SHAREPOINT_SHARED_URL="https://r3factoryae-my.sharepoint.com/:x:/g/personal/technical_r3factory_ae/EX11P9jpMAZOnNlg6hhYGUUBNo56OzdCIhmi5yAdw1MFQQ?e=NUcdQE"
+
+# Gmail SMTP Configuration
+export SMTP_SERVER="smtp.gmail.com"
+export SMTP_PORT="587"
+export EMAIL_USERNAME="hussain.f.kagi@gmail.com"
+export EMAIL_PASSWORD="aclb kyal bhsz epzy"
+export RECIPIENT_EMAIL="recipient@company.com"
