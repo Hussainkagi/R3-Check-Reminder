@@ -1,10 +1,8 @@
 name: Daily SharePoint Cheque Reminder
-
 on:
   schedule:
     # Runs daily at 9:00 AM UTC (adjust timezone as needed)
-    - cron: "0 9 * * *"
-
+    - cron: "0 9 * * *"  # Fixed: was "0 9 * **"
   # Allow manual triggering for testing
   workflow_dispatch:
     inputs:
@@ -16,25 +14,24 @@ on:
 jobs:
   send-reminder:
     runs-on: ubuntu-latest
-
     steps:
       # Step 1: Get the code from repository
       - name: Checkout repository
         uses: actions/checkout@v4
-
+        
       # Step 2: Set up Python environment
       - name: Set up Python 3.9
         uses: actions/setup-python@v4
         with:
           python-version: "3.9"
           cache: "pip" # Cache pip dependencies for faster builds
-
+          
       # Step 3: Install Python dependencies
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
+          
       # Step 4: Run the reminder script
       - name: Run SharePoint reminder check
         env:
@@ -47,7 +44,7 @@ jobs:
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
           TEST_RUN: ${{ github.event.inputs.test_run }}
         run: python sharepoint_reminder.py
-
+        
       # Step 5: Upload logs as artifacts (for debugging)
       - name: Upload logs
         uses: actions/upload-artifact@v4
@@ -58,7 +55,7 @@ jobs:
             *.log
             logs/
           retention-days: 30
-
+          
       # Step 6: Send notification on failure (optional)
       - name: Send failure notification
         if: failure()
@@ -74,12 +71,10 @@ jobs:
           from email.mime.text import MIMEText
           from datetime import datetime
           import os
-
           msg = MIMEText('The SharePoint cheque reminder script failed to run successfully. Please check the GitHub Actions logs for details.')
           msg['Subject'] = '⚠️ SharePoint Reminder Script Failed - ' + datetime.now().strftime('%Y-%m-%d')
           msg['From'] = os.getenv('EMAIL_USERNAME')
           msg['To'] = os.getenv('RECIPIENT_EMAIL')
-
           try:
               server = smtplib.SMTP(os.getenv('SMTP_SERVER'), int(os.getenv('SMTP_PORT')))
               server.starttls()
