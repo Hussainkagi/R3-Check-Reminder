@@ -1,8 +1,8 @@
 name: Daily SharePoint Cheque Reminder
 on:
   schedule:
-    # Runs daily at 9:00 AM UTC (adjust timezone as needed)
-    - cron: "0 9 * * *"  # Fixed: was "0 9 * **"
+    # Runs daily at 9:00 AM UTC (fixed cron syntax)
+    - cron: "0 9 * * *"  # minute hour day month day-of-week
   # Allow manual triggering for testing
   workflow_dispatch:
     inputs:
