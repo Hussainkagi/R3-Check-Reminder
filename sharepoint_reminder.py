@@ -8,7 +8,7 @@ import requests
 import io
 import logging
 import time
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List, Union
 
 # Configure logging
 logging.basicConfig(
@@ -21,14 +21,62 @@ class SharePointSharedLinkReminder:
     """SharePoint Shared Link Reminder system"""
     
     def __init__(self, sharepoint_shared_url: str, smtp_server: str, smtp_port: int, 
-                 email_username: str, email_password: str, recipient_email: str):
-        """Initialize the SharePoint Shared Link Reminder system"""
+                 email_username: str, email_password: str, 
+                 recipient_emails: Union[str, List[str]]):
+        """
+        Initialize the SharePoint Shared Link Reminder system
+        
+        Args:
+            sharepoint_shared_url: SharePoint shared link URL
+            smtp_server: SMTP server address
+            smtp_port: SMTP server port
+            email_username: Email username for authentication
+            email_password: Email password for authentication
+            recipient_emails: Single email string, comma-separated string, or list of email addresses
+        """
         self.sharepoint_shared_url = sharepoint_shared_url
         self.smtp_server = smtp_server
         self.smtp_port = smtp_port
         self.email_username = email_username
         self.email_password = email_password
-        self.recipient_email = recipient_email
+        self.recipient_emails = self._parse_recipient_emails(recipient_emails)
+        
+        logging.info(f"Initialized with {len(self.recipient_emails)} recipient(s): {', '.join(self.recipient_emails)}")
+        
+    def _parse_recipient_emails(self, recipient_emails: Union[str, List[str]]) -> List[str]:
+        """
+        Parse and validate recipient emails
+        
+        Args:
+            recipient_emails: Single email, comma-separated string, or list of emails
+            
+        Returns:
+            List of validated email addresses
+        """
+        if isinstance(recipient_emails, str):
+            # Split by comma, semicolon, or whitespace and clean
+            import re
+            emails = re.split(r'[,;\s]+', recipient_emails.strip())
+        elif isinstance(recipient_emails, list):
+            emails = recipient_emails
+        else:
+            raise ValueError("recipient_emails must be a string or list")
+        
+        # Clean and validate emails
+        cleaned_emails = []
+        email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+        
+        for email in emails:
+            email = email.strip()
+            if email and email_pattern.match(email):
+                cleaned_emails.append(email)
+            elif email:  # Non-empty but invalid
+                logging.warning(f"Invalid email format skipped: {email}")
+        
+        if not cleaned_emails:
+            raise ValueError("No valid email addresses provided")
+            
+        return cleaned_emails
         
     def convert_sharepoint_url_to_direct_download(self, shared_url: str) -> str:
         """Convert SharePoint shared URL to direct download URL"""
@@ -465,30 +513,49 @@ class SharePointSharedLinkReminder:
         return html_body
     
     def send_email_reminder(self, reminder_data: pd.DataFrame) -> bool:
-        """Send email reminder"""
+        """Send email reminder to multiple recipients"""
         if reminder_data.empty:
             logging.info("No reminders to send")
             return True
         
         try:
+            # Create the email message
             msg = MIMEMultipart()
             msg['From'] = self.email_username
-            msg['To'] = self.recipient_email
             msg['Subject'] = f"Cheque Payment Due Reminder - {len(reminder_data)} payment(s) due in 3 days"
             
+            # Add recipients - use BCC for multiple recipients to maintain privacy
+            if len(self.recipient_emails) == 1:
+                msg['To'] = self.recipient_emails[0]
+            else:
+                # Use undisclosed recipients for multiple emails
+                msg['To'] = "undisclosed-recipients:;"
+                msg['BCC'] = ", ".join(self.recipient_emails)
+            
+            # Create and attach the email body
             body = self.create_email_body(reminder_data)
             msg.attach(MIMEText(body, 'html'))
             
+            # Connect to SMTP server and send email
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                 server.starttls()
                 server.login(self.email_username, self.email_password)
-                server.send_message(msg)
+                
+                # Send to all recipients
+                server.send_message(
+                    msg,
+                    from_addr=self.email_username,
+                    to_addrs=self.recipient_emails
+                )
             
-            logging.info(f"✅ Email reminder sent successfully to {self.recipient_email}")
+            recipient_list = ", ".join(self.recipient_emails)
+            logging.info(f"✅ Email reminder sent successfully to {len(self.recipient_emails)} recipient(s): {recipient_list}")
             return True
             
         except Exception as e:
             logging.error(f"Failed to send email: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
             return False
     
     def run_reminder_check(self) -> bool:
@@ -519,9 +586,50 @@ class SharePointSharedLinkReminder:
             return True
 
 
+def parse_recipient_emails_from_env(env_var: str) -> List[str]:
+    """
+    Helper function to parse recipient emails from environment variable
+    
+    Args:
+        env_var: Environment variable value containing emails
+        
+    Returns:
+        List of parsed and validated email addresses
+    """
+    if not env_var:
+        return []
+        
+    import re
+    
+    # Split by common delimiters
+    emails = re.split(r'[,;\s]+', env_var.strip())
+    
+    # Clean and validate emails
+    cleaned_emails = []
+    email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+    
+    for email in emails:
+        email = email.strip()
+        if email and email_pattern.match(email):
+            cleaned_emails.append(email)
+        elif email:  # Non-empty but invalid
+            logging.warning(f"Invalid email format in environment variable: {email}")
+    
+    return cleaned_emails
+
+
 def main() -> bool:
     """Main function"""
     logging.info("📋 SharePoint Cheque Payment Due Reminder Starting...")
+    
+    # Parse recipient emails from environment variable
+    recipient_emails_env = os.getenv('RECIPIENT_EMAILS', os.getenv('RECIPIENT_EMAIL', ''))
+    recipient_emails = parse_recipient_emails_from_env(recipient_emails_env)
+    
+    if not recipient_emails:
+        logging.error("❌ No valid recipient emails found. Please set RECIPIENT_EMAILS or RECIPIENT_EMAIL environment variable")
+        logging.error("   Example: RECIPIENT_EMAILS='user1@example.com,user2@example.com,user3@example.com'")
+        return False
     
     config = {
         'sharepoint_shared_url': os.getenv('SHAREPOINT_SHARED_URL'),
@@ -529,15 +637,20 @@ def main() -> bool:
         'smtp_port': int(os.getenv('SMTP_PORT', '587')),
         'email_username': os.getenv('EMAIL_USERNAME'),
         'email_password': os.getenv('EMAIL_PASSWORD'),
-        'recipient_email': os.getenv('RECIPIENT_EMAIL')
+        'recipient_emails': recipient_emails
     }
     
-    missing_config = [key for key, value in config.items() if value is None or value == '']
+    # Check for missing configuration (excluding recipient_emails as we've already validated it)
+    missing_config = []
+    for key, value in config.items():
+        if key != 'recipient_emails' and (value is None or value == ''):
+            missing_config.append(key)
+    
     if missing_config:
         logging.error(f"❌ Missing required environment variables: {missing_config}")
         return False
     
-    logging.info("✅ Configuration loaded successfully")
+    logging.info(f"✅ Configuration loaded successfully with {len(recipient_emails)} recipient(s)")
     
     reminder_system = SharePointSharedLinkReminder(**config)
     success = reminder_system.run_reminder_check()
