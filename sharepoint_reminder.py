@@ -8,6 +8,7 @@ import requests
 import io
 import logging
 import time
+import re  # Add this import at the top
 from typing import Optional, Tuple, Dict, Any, List, Union
 
 # Configure logging
@@ -55,7 +56,6 @@ class SharePointSharedLinkReminder:
         """
         if isinstance(recipient_emails, str):
             # Split by comma, semicolon, or whitespace and clean
-            import re
             emails = re.split(r'[,;\s]+', recipient_emails.strip())
         elif isinstance(recipient_emails, list):
             emails = recipient_emails
@@ -599,8 +599,6 @@ def parse_recipient_emails_from_env(env_var: str) -> List[str]:
     if not env_var:
         return []
         
-    import re
-    
     # Split by common delimiters
     emails = re.split(r'[,;\s]+', env_var.strip())
     
